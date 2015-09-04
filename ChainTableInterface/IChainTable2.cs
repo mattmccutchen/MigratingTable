@@ -64,7 +64,9 @@ namespace ChainTableInterface
          *          On success, return TableResult, code = 204 (NoContent);
          *          Otherwise, throw storage exception with corresponding http error code.
          *          XXX: Do we expect implementations that don't use tombstones to emulate
-         *          this (inefficiently) or just throw NotImplementedException?
+         *          this (only for singleton batches, otherwise it may not be possible to
+         *          emulate linearizably) or just throw NotImplementedException?
+         *          MigratingTable currently does the former.
          */
         Task<TableResult> ExecuteAsync(TableOperation operation,
             TableRequestOptions requestOptions = null, OperationContext operationContext = null);
@@ -117,8 +119,7 @@ namespace ChainTableInterface
          * It might allow some implementations to extend useful guarantees that
          * certain kinds of errors will be caught on the initial
          * ExecuteQueryStreamed, but it might make some caller code more
-         * complex.  See what I think when I implement this in MigratingTable.
-         * The model doesn't call this at all for the time being.
+         * complex.
          *
          * The caller should dispose the returned stream.  This unfortunate(?)
          * requirement is passed up from MigratingTable, whose stream holds a

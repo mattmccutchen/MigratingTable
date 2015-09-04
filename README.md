@@ -31,7 +31,7 @@ Starting with a live application using the "old" table, to migrate to the "new" 
 
 ## Known bugs in MigratingTable
 
-- The DeleteIfExists implementation for USE_NEW_HIDE_METADATA state, that just omits the operation from the batch, is not linearizable.  It can also fail by generating a zero-length batch.  The second part is easy to fix, but we should probably remove DeleteIfExists from IChainTable2 unless/until we can fix the first part.
+None.
 
 ## Known bugs in the test harness
 

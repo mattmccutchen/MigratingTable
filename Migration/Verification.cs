@@ -341,7 +341,11 @@ namespace Migration
 
                     for (int opNum = 0; opNum < batchSize; opNum++)
                     {
-                        int opTypeNum = PSharpNondeterminism.Choice(7);
+                        // If MTable knows to reject non-singleton batches with DeleteIfExists,
+                        // then don't generate them.
+                        int opTypeNum = PSharpNondeterminism.Choice(
+                            MigrationModel.GetEnabledBug() == MTableOptionalBug.DeleteIfExistsNotLinearizable
+                            || batchSize == 1 ? 7 : 6);
                         int rowKeyI = PSharpNondeterminism.Choice(rowKeyChoices.Count);
                         string rowKey = rowKeyChoices[rowKeyI];
                         rowKeyChoices.RemoveAt(rowKeyI);  // Avoid duplicate in same batch
