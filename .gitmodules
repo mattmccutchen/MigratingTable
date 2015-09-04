@@ -1,4 +1,10 @@
 [submodule "PSharp"]
 	path = PSharp
-	url = https://github.com/jerickmsft/PSharp.git
+	# Should be a good default.  The default git server implementation seems
+	# to try appending .git if necessary, and GitHub and Visual Studio
+	# Online work with this too (for VSO, one must use the non-default
+	# URL form
+	# https://ACCOUNT.visualstudio.com/DefaultCollection/MigratingTable/_git/MigratingTable
+	# if PSharp is another repository in the same project).
+	url = ../PSharp
 	branch = for-migratingtable
