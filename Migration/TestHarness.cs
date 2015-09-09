@@ -70,13 +70,6 @@ namespace Migration
         {
             return PSharpRuntime.GetTestVar("mtablebugtest");
         }
-        internal static int NumServiceMachines
-        {
-            get
-            {
-                return (GetEnabledBugTest() == "1") ? 1 : 2;
-            }
-        }
     }
 
     interface ITablesMachinePeek
@@ -232,25 +225,27 @@ namespace Migration
         }
     }
 
-    class ServiceMachineCore : AppMachineCore
+    abstract class ServiceMachineCore : AppMachineCore
     {
+        IReadOnlyConfigurationService<MTableConfiguration> configService;
         /*readonly*/ MigratingTable migratingTable;
         MirrorTableCall currentReferenceCall;
-        IList<TableResult> successfulBatchResult;
+        internal IList<TableResult> successfulBatchResult;  // read by reference calls in subclasses
         Outcome<object, StorageException>? currentReferenceOutcome;
 
         internal override void Initialize(MachineId machineId, AppMachineInitializePayload payload)
         {
             base.Initialize(machineId, payload);
-            migratingTable = new MigratingTable(payload.configService, payload.oldTable, payload.newTable,
+            configService = payload.configService;
+            migratingTable = new MigratingTable(configService, payload.oldTable, payload.newTable,
                 new ChainTableMonitor(this), MigrationModel.GetEnabledBug());
-            if (MigrationModel.GetEnabledBugTest() == "1")
-            {
-                MTableConfiguration dummy;
-                payload.configService.Subscribe(new Bug1Subscriber(this), out dummy);
-            }
+            InitializeHooks();
         }
 
+        internal virtual void InitializeHooks() { }
+
+        // This method does not log what the call is, since there's no way to
+        // know what's inside the delegates.  Use RunBatchAsync or RunQueryAtomicAsync.
         async Task RunCallAsync(TableCall originalCall, MirrorTableCall referenceCall)
         {
             // TODO: All assertions should show what the call was.
@@ -290,6 +285,24 @@ namespace Migration
             currentReferenceOutcome = null;
         }
 
+        internal async Task RunQueryAtomicAsync(TableQuery<DynamicTableEntity> query)
+        {
+            // async/await pair needed to upcast the return value to object.
+            TableCall originalCall = async table => await table.ExecuteQueryAtomicAsync(query);
+            MirrorTableCall referenceCall = async referenceTable => await referenceTable.ExecuteQueryAtomicAsync(query);
+            Console.WriteLine("{0} starting atomic query: {1}", machineId, query);
+            await RunCallAsync(originalCall, referenceCall);
+        }
+
+        internal async Task RunBatchAsync(TableBatchOperation batch)
+        {
+            TableBatchOperation batchCopy = ChainTableUtils.CopyBatch<DynamicTableEntity>(batch);
+            TableCall originalCall = async table => await table.ExecuteBatchAsync(batch);
+            MirrorTableCall referenceCall = async referenceTable => await referenceTable.ExecuteMirrorBatchAsync(batchCopy, successfulBatchResult);
+            Console.WriteLine("{0} starting batch: {1}", machineId, BetterComparer.ToString(batch));
+            await RunCallAsync(originalCall, referenceCall);
+        }
+
         internal override async Task HandleLinearizationPoint(IList<TableResult> successfulBatchResult)
         {
             PSharpRuntime.Assert(currentReferenceOutcome == null,
@@ -299,112 +312,9 @@ namespace Migration
                 annotationProxy.AnnotateLastBackendCallAsync(currentReferenceCall, null));
         }
 
-        string NondeterministicUserPropertyFilterString()
-        {
-            switch (PSharpNondeterminism.Choice(3))
-            {
-                case 0: return "";
-                case 1: return TableQuery.GenerateFilterConditionForBool("isHappy", QueryComparisons.Equal, false);
-                case 2: return TableQuery.GenerateFilterConditionForBool("isHappy", QueryComparisons.Equal, true);
-                default: throw new NotImplementedException();  // not reached
-            }
-        }
-
-        async Task DoRandomAtomicCalls()
-        {
-            for (int callNum = 0; callNum < MigrationModel.NUM_CALLS_PER_MACHINE; callNum++)
-            {
-                TableCall originalCall;
-                MirrorTableCall referenceCall;
-                SortedDictionary<PrimaryKey, DynamicTableEntity> dump = await peekProxy.DumpReferenceTableAsync();
-
-                if (PSharpRuntime.Nondeterministic())
-                {
-                    // Query
-                    var query = new TableQuery<DynamicTableEntity>();
-                    query.FilterString = ChainTableUtils.CombineFilters(
-                        TableQuery.GenerateFilterCondition(
-                            TableConstants.PartitionKey, QueryComparisons.Equal, MigrationModel.SINGLE_PARTITION_KEY),
-                        TableOperators.And,
-                        NondeterministicUserPropertyFilterString());
-                    // async/await pair needed to upcast the return value to object.
-                    originalCall = async table => await table.ExecuteQueryAtomicAsync(query);
-                    referenceCall = async referenceTable => await referenceTable.ExecuteQueryAtomicAsync(query);
-                    Console.WriteLine("{0} starting atomic query: {1}", machineId, query);
-                }
-                else
-                {
-                    // Batch write
-                    int batchSize = PSharpRuntime.Nondeterministic() ? 2 : 1;
-                    var batch = new TableBatchOperation();
-                    var rowKeyChoices = new List<string> { "0", "1", "2", "3", "4", "5" };
-
-                    for (int opNum = 0; opNum < batchSize; opNum++)
-                    {
-                        // If MTable knows to reject non-singleton batches with DeleteIfExists,
-                        // then don't generate them.
-                        int opTypeNum = PSharpNondeterminism.Choice(
-                            MigrationModel.GetEnabledBug() == MTableOptionalBug.DeleteIfExistsNotLinearizable
-                            || batchSize == 1 ? 7 : 6);
-                        int rowKeyI = PSharpNondeterminism.Choice(rowKeyChoices.Count);
-                        string rowKey = rowKeyChoices[rowKeyI];
-                        rowKeyChoices.RemoveAt(rowKeyI);  // Avoid duplicate in same batch
-                        var primaryKey = new PrimaryKey(MigrationModel.SINGLE_PARTITION_KEY, rowKey);
-                        string eTag = null;
-                        if (opTypeNum >= 1 && opTypeNum <= 3)
-                        {
-                            DynamicTableEntity existingEntity;
-                            int etagTypeNum = PSharpNondeterminism.Choice(
-                                dump.TryGetValue(primaryKey, out existingEntity) ? 3 : 2);
-                            switch (etagTypeNum)
-                            {
-                                case 0: eTag = ChainTable2Constants.ETAG_ANY; break;
-                                case 1: eTag = "wrong"; break;
-                                case 2: eTag = existingEntity.ETag; break;
-                            }
-                        }
-                        DynamicTableEntity entity = new DynamicTableEntity
-                        {
-                            PartitionKey = MigrationModel.SINGLE_PARTITION_KEY,
-                            RowKey = rowKey,
-                            ETag = eTag,
-                            Properties = new Dictionary<string, EntityProperty> {
-                                // Give us something to see on merge.  Might help with tracing too!
-                                { string.Format("{0}_c{1}_o{2}", machineId.ToString(), callNum, opNum),
-                                    new EntityProperty(true) },
-                                // Property with 50%/50% distribution for use in filters.
-                                { "isHappy", new EntityProperty(PSharpRuntime.Nondeterministic()) }
-                            }
-                        };
-                        switch (opTypeNum)
-                        {
-                            case 0: batch.Insert(entity); break;
-                            case 1: batch.Replace(entity); break;
-                            case 2: batch.Merge(entity); break;
-                            case 3: batch.Delete(entity); break;
-                            case 4: batch.InsertOrReplace(entity); break;
-                            case 5: batch.InsertOrMerge(entity); break;
-                            case 6:
-                                entity.ETag = ChainTable2Constants.ETAG_DELETE_IF_EXISTS;
-                                batch.Delete(entity); break;
-                        }
-                    }
-
-                    TableBatchOperation batchCopy = ChainTableUtils.CopyBatch<DynamicTableEntity>(batch);
-                    originalCall = async table => await table.ExecuteBatchAsync(batch);
-                    referenceCall = async referenceTable => await referenceTable.ExecuteMirrorBatchAsync(batchCopy, successfulBatchResult);
-                    Console.WriteLine("{0} starting batch: {1}", machineId, BetterComparer.ToString(batch));
-                }
-
-                await RunCallAsync(originalCall, referenceCall);
-            }
-        }
-
-        async Task DoQueryStreamed()
+        internal async Task RunQueryStreamedAsync(TableQuery<DynamicTableEntity> query)
         {
             int startRevision = await peekProxy.GetReferenceTableRevisionAsync();
-            var query = new TableQuery<DynamicTableEntity>();
-            query.FilterString = NondeterministicUserPropertyFilterString();
             FilterExpression filterExpr = ChainTableUtils.ParseFilterString(query.FilterString);
             Console.WriteLine("{0} starting streaming query: {1}", machineId, query);
             using (IQueryStream<DynamicTableEntity> stream = await migratingTable.ExecuteQueryStreamedAsync(query))
@@ -445,55 +355,62 @@ namespace Migration
             Console.WriteLine("{0} finished streaming query", machineId);
         }
 
-        class Bug1Subscriber : IConfigurationSubscriber<MTableConfiguration>
+        class StateTriggeredActionSubscriber : IConfigurationSubscriber<MTableConfiguration>
         {
-            readonly ServiceMachineCore outer;
-            internal Bug1Subscriber(ServiceMachineCore outer)
+            readonly ServiceMachineCore outer;  // Unused now...
+            readonly TableClientState triggerState;
+            readonly Func<Task> asyncAction;
+            internal StateTriggeredActionSubscriber(ServiceMachineCore outer, TableClientState triggerState, Func<Task> asyncAction)
             {
                 this.outer = outer;
+                this.triggerState = triggerState;
+                this.asyncAction = asyncAction;
             }
 
             public async Task ApplyConfigurationAsync(MTableConfiguration newConfig)
             {
-                if (newConfig.state == TableClientState.PREFER_NEW)
+                if (newConfig.state == triggerState)
                 {
-                    TableBatchOperation batch = new TableBatchOperation();
-                    batch.InsertOrMerge(TestUtils.CreateTestEntity2("0", false));
-                    TableBatchOperation batchCopy = ChainTableUtils.CopyBatch<DynamicTableEntity>(batch);
-                    TableCall originalCall = async table => await table.ExecuteBatchAsync(batch);
-                    MirrorTableCall referenceCall = async referenceTable => await referenceTable.ExecuteMirrorBatchAsync(batchCopy, outer.successfulBatchResult);
-                    await outer.RunCallAsync(originalCall, referenceCall);
-
-                    await outer.DoQueryStreamed();
+                    await asyncAction();
                 }
             }
         }
 
-        internal override Task Run()
+        // Not the greatest naming.  OnTableClientState blocks the configuration
+        // push until asyncAction completes, while AfterTableClientState does not.
+
+        internal void OnTableClientState(TableClientState triggerState, Func<Task> asyncAction)
         {
-            if (MigrationModel.GetEnabledBugTest() == "1")
+            MTableConfiguration dummy;
+            configService.Subscribe(new StateTriggeredActionSubscriber(this, triggerState, asyncAction), out dummy);
+        }
+
+        class ActionDispatchable : IDispatchable
+        {
+            readonly Action action;
+            internal ActionDispatchable(Action action)
             {
-                // Special test case for QueryStreamedFilterShadowing.
-                // Work is done in Bug1Subscriber so we can force it to happen at the right time.
+                this.action = action;
+            }
+            public void Dispatch()
+            {
+                action();
+            }
+        }
+        internal void AfterTableClientState(TableClientState triggerState, Action action)
+        {
+            OnTableClientState(triggerState, () => {
+                PSharpRuntime.SendEvent(machineId, new GenericDispatchableEvent(), new ActionDispatchable(action));
                 return Task.CompletedTask;
-            }
-            else if (PSharpRuntime.Nondeterministic())
-            {
-                return DoQueryStreamed();
-            }
-            else
-            {
-                return DoRandomAtomicCalls();
-            }
+            });
         }
     }
 
     class ServiceMachine : Machine
     {
-        readonly ServiceMachineCore core;
+        /*readonly*/ ServiceMachineCore core;
         readonly MachineSynchronizationContext synchronizationContext;
         public ServiceMachine() {
-            core = new ServiceMachineCore();
             synchronizationContext = new MachineSynchronizationContext(Id);
         }
 
@@ -506,6 +423,7 @@ namespace Migration
         }
 
         [Start]
+        [OnEntry(nameof(SaveInitialPayload))]
         [OnEventGotoState(typeof(AppMachineInitializeEvent), typeof(MainState), nameof(Initialize))]
         class WaitingForInitialization : MachineState { }
 
@@ -513,6 +431,10 @@ namespace Migration
         [OnEventDoAction(typeof(GenericDispatchableEvent), nameof(DispatchPayload))]
         class MainState : MachineState { }
 
+        void SaveInitialPayload()
+        {
+            core = (ServiceMachineCore)Payload;
+        }
         void Initialize()
         {
             //Monitor<RunningServiceMachinesMonitor>(new ServiceMachineCountChangeEvent(), 1);
@@ -823,7 +745,7 @@ namespace Migration
         }
     }
 
-    class TablesMachine : Machine, ITablesMachinePeek, ITablesMachineAnnotation
+    partial class TablesMachine : Machine, ITablesMachinePeek, ITablesMachineAnnotation
     {
         readonly MachineSynchronizationContext synchronizationContext;
         public TablesMachine()
@@ -903,72 +825,24 @@ namespace Migration
 
         async void Initialize()
         {
-            // TODO: Figure out how to verify the transition from
-            // "old table only" to "in migration" to "new table only".
-            // (I don't think this is the biggest risk, but I'm still
-            // interested in verifying it.)
-            // I assume once we do that, the possibility of insertions while
-            // we're in "old table only" will model the ability to start
-            // from a nonempty table.
-
             configService = new InMemoryConfigurationService<MTableConfiguration>(
                 MasterMigratingTable.INITIAL_CONFIGURATION);
             oldTable = new InMemoryTableWithHistory();
             newTable = new InMemoryTableWithHistory();
             referenceTable = new InMemoryTableWithHistory();
 
-#if false
-            MTableEntity eMeta = new MTableEntity {
-                PartitionKey = MigrationModel.SINGLE_PARTITION_KEY,
-                RowKey = MigratingTable.ROW_KEY_PARTITION_META,
-                partitionState = MTablePartitionState.SWITCHED,
-            };
-            MTableEntity e0 = TestUtils.CreateTestMTableEntity("0", "orange");
-            MTableEntity e1old = TestUtils.CreateTestMTableEntity("1", "red");
-            MTableEntity e2new = TestUtils.CreateTestMTableEntity("2", "green");
-            MTableEntity e3old = TestUtils.CreateTestMTableEntity("3", "blue");
-            MTableEntity e3new = TestUtils.CreateTestMTableEntity("3", "azure");
-            MTableEntity e4old = TestUtils.CreateTestMTableEntity("4", "yellow");
-            MTableEntity e4new = TestUtils.CreateTestMTableEntity("4", null, true);
-            var oldBatch = new TableBatchOperation();
-            oldBatch.InsertOrReplace(eMeta);
-            oldBatch.InsertOrReplace(e0);
-            oldBatch.InsertOrReplace(e1old);
-            oldBatch.InsertOrReplace(e3old);
-            oldBatch.InsertOrReplace(e4old);
-            IList<TableResult> oldTableResult = await oldTable.ExecuteBatchAsync(oldBatch);
-            await ExecuteExportedMirrorBatchAsync(oldBatch, oldTableResult);
-            var newBatch = new TableBatchOperation();
-            newBatch.InsertOrReplace(e0);
-            newBatch.InsertOrReplace(e2new);
-            newBatch.InsertOrReplace(e3new);
-            newBatch.InsertOrReplace(e4new);
-            IList<TableResult> newTableResult = await newTable.ExecuteBatchAsync(newBatch);
-            // Allow rows to overwrite rather than composing the virtual ETags manually.
-            // InsertOrReplace doesn't use the ETag, so we don't care that the ETag was mutated by the original batch.
-            await ExecuteExportedMirrorBatchAsync(newBatch, newTableResult);
-#endif
-
-            // Start with the old table now.
-            var batch = new TableBatchOperation();
-            batch.InsertOrReplace(TestUtils.CreateTestEntity2("0", true));
-            batch.InsertOrReplace(TestUtils.CreateTestEntity2("1", false));
-            batch.InsertOrReplace(TestUtils.CreateTestEntity2("3", false));
-            batch.InsertOrReplace(TestUtils.CreateTestEntity2("4", true));
-            IList<TableResult> oldTableResult = await oldTable.ExecuteBatchAsync(batch);
-            // InsertOrReplace doesn't use the ETag, so we don't care that the ETag was mutated by the original batch.
-            await referenceTable.ExecuteMirrorBatchAsync(batch, oldTableResult);
-
             //CreateMonitor(typeof(RunningServiceMachinesMonitor));
 
-            for (int i = 0; i < MigrationModel.NumServiceMachines; i++)
-            {
-                InitializeAppMachine(CreateMachine(typeof(ServiceMachine)));
-            }
+            await InitializeTestCaseAsync();
 
             InitializeAppMachine(CreateMachine(typeof(MigratorMachine)));
 
             Send(Id, new TablesMachineInitializedEvent());
+        }
+
+        void AddServiceMachineCore(ServiceMachineCore core)
+        {
+            InitializeAppMachine(CreateMachine(typeof(ServiceMachine), core));
         }
 
         void DispatchTableCall()

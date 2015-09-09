@@ -109,13 +109,14 @@
     <Compile Include="PSharpUtils\MachineSynchronizationContext.cs" />
     <Compile Include="PSharpUtils\Replies.cs" />
     <Compile Include="SwitchableTable.cs" />
+    <Compile Include="TestCases.cs" />
     <Compile Include="Utils\AsyncLock.cs" />
     <Compile Include="Utils\Hasher.cs" />
     <Compile Include="Utils\Collections.cs" />
     <Compile Include="Utils\Comparer.cs" />
     <Compile Include="Utils\Outcome.cs" />
     <Compile Include="Utils\SynchronizationContextUse.cs" />
-    <Compile Include="Verification.cs" />
+    <Compile Include="TestHarness.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

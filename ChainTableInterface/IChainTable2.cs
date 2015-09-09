@@ -63,10 +63,9 @@ namespace ChainTableInterface
          *   (5) DeleteIfExists (represented as Delete with ETag = ETAG_DELETE_IF_EXISTS)
          *          On success, return TableResult, code = 204 (NoContent);
          *          Otherwise, throw storage exception with corresponding http error code.
-         *          XXX: Do we expect implementations that don't use tombstones to emulate
-         *          this (only for singleton batches, otherwise it may not be possible to
-         *          emulate linearizably) or just throw NotImplementedException?
-         *          MigratingTable currently does the former.
+         *          XXX: Do we expect the real-Azure adapter to emulate this (only for
+         *          singleton batches, otherwise it may not be possible to emulate
+         *          linearizably) or just throw NotImplementedException?
          */
         Task<TableResult> ExecuteAsync(TableOperation operation,
             TableRequestOptions requestOptions = null, OperationContext operationContext = null);

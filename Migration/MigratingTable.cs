@@ -38,10 +38,6 @@ namespace Migration
         MigrateSkipUseNewWithTombstones,
         InsertBehindMigrator,
 
-        // organic
-        DeleteIfExistsEmptyBatch,
-        DeleteIfExistsNotLinearizable,
-
         NumBugs,
     }
 
@@ -369,15 +365,11 @@ namespace Migration
                     else
                     {
                         if (passedEntity.ETag == ChainTable2Constants.ETAG_DELETE_IF_EXISTS)
-                        {
-                            if (existingEntity != null)
-                                newOp = TableOperation.Delete(new MTableEntity {
-                                    PartitionKey = buggablePartitionKey, RowKey = buggableRowKey,
-                                    // It's OK to delete the entity and return success whether or not
-                                    // the entity is a tombstone by the time it is actually deleted.
-                                    ETag = IsBugEnabled(MTableOptionalBug.DeleteNoLeaveTombstonesETag) ? null : ChainTable2Constants.ETAG_ANY });
-                            // Otherwise generate nothing.
-                        }
+                            newOp = TableOperation.Delete(new MTableEntity {
+                                PartitionKey = buggablePartitionKey, RowKey = buggableRowKey,
+                                // It's OK to delete the entity and return success whether or not
+                                // the entity is a tombstone by the time it is actually deleted.
+                                ETag = IsBugEnabled(MTableOptionalBug.DeleteNoLeaveTombstonesETag) ? null : ChainTable2Constants.ETAG_DELETE_IF_EXISTS });
                         else if ((errorCode = CheckExistingEntity(passedEntity, existingEntity)) == null)
                             // Another client in USE_NEW_WITH_TOMBSTONES could concurrently replace the
                             // entity with a tombstone, in which case we need to return 404 to the caller,
@@ -489,39 +481,22 @@ namespace Migration
                     await monitor.AnnotateLastBackendCallAsync(wasLinearizationPoint: true);
                     throw ChainTableUtils.GenerateBatchException(errorCode.Value, i);
                 }
-                if (newOp != null)
-                {
-                    inputToNewTableIndexMapping.Add(newBatch.Count);
-                    newBatch.Add(newOp);
-                }
-                else
-                {
-                    inputToNewTableIndexMapping.Add(null);
-                }
+                Debug.Assert(newOp != null);
+                inputToNewTableIndexMapping.Add(newBatch.Count);
+                newBatch.Add(newOp);
             }
+            await monitor.AnnotateLastBackendCallAsync();
 
             IList<TableResult> newResults;
-            if (!IsBugEnabled(MTableOptionalBug.DeleteIfExistsEmptyBatch) && newBatch.Count == 0)  // Can happen with DeleteIfExists
-                newResults = new List<TableResult>();
-            else if (!IsBugEnabled(MTableOptionalBug.DeleteIfExistsNotLinearizable) && newBatch.Count < batch.Count)
-                // Should not get here with the check in ExecuteBatchAsync.
-                throw new NotImplementedException(
-                    "Some operations translated to something and others to nothing.  " +
-                    "We cannot emulate the original batch linearizably.");
-            else
+            try
             {
-                // The query was not the linearization point.
+                newResults = await newTable.ExecuteBatchAsync(newBatch, requestOptions, operationContext);
+            }
+            catch (ChainTableBatchException)
+            {
+                // XXX: Try to distinguish expected concurrency exceptions from unexpected exceptions?
                 await monitor.AnnotateLastBackendCallAsync();
-                try
-                {
-                    newResults = await newTable.ExecuteBatchAsync(newBatch, requestOptions, operationContext);
-                }
-                catch (ChainTableBatchException)
-                {
-                    // XXX: Try to distinguish expected concurrency exceptions from unexpected exceptions?
-                    await monitor.AnnotateLastBackendCallAsync();
-                    goto Attempt;
-                }
+                goto Attempt;
             }
 
             // We made it!
@@ -545,18 +520,12 @@ namespace Migration
                     Result = passedEntity,
                 });
             }
-            // Could be either the query or the batch.
             await monitor.AnnotateLastBackendCallAsync(wasLinearizationPoint: true, successfulBatchResult: results);
             return results;
         }
 
         public override async Task<IList<TableResult>> ExecuteBatchAsync(TableBatchOperation batch, TableRequestOptions requestOptions = null, OperationContext operationContext = null)
         {
-            if (!IsBugEnabled(MTableOptionalBug.DeleteIfExistsNotLinearizable) &&
-                batch.Count > 1 && batch.Any(op =>
-                    op.GetOperationType() == TableOperationType.Delete &&
-                    op.GetEntity().ETag == ChainTable2Constants.ETAG_DELETE_IF_EXISTS))
-                throw new NotImplementedException("DeleteIfExists is only supported as the only operation in a batch.");
             MTableConfiguration config;
             using (configService.Subscribe(FixedSubscriber<MTableConfiguration>.Instance, out config))
             {
