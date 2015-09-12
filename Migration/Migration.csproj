@@ -99,24 +99,14 @@
   <ItemGroup>
     <Compile Include="IChainTableMonitor.cs" />
     <Compile Include="ConfigurationService.cs" />
-    <Compile Include="InMemoryTable.cs" />
     <Compile Include="MasterMigratingTable.cs" />
     <Compile Include="MTableEntity.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="MigratingTable.cs" />
-    <Compile Include="PSharpUtils\PSharpNondeterminism.cs" />
-    <Compile Include="PSharpUtils\PSharpProxy.cs" />
-    <Compile Include="PSharpUtils\MachineSynchronizationContext.cs" />
-    <Compile Include="PSharpUtils\Replies.cs" />
     <Compile Include="SwitchableTable.cs" />
-    <Compile Include="TestCases.cs" />
     <Compile Include="Utils\AsyncLock.cs" />
-    <Compile Include="Utils\Hasher.cs" />
     <Compile Include="Utils\Collections.cs" />
-    <Compile Include="Utils\Comparer.cs" />
     <Compile Include="Utils\Outcome.cs" />
-    <Compile Include="Utils\SynchronizationContextUse.cs" />
-    <Compile Include="TestHarness.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

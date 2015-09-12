@@ -128,38 +128,6 @@ namespace ChainTableInterface
             };
         }
 
-        // XXX: Preserve the entity type without the caller having to specify it?
-        public static TableOperation CopyOperation<TEntity>(TableOperation op)
-            where TEntity : ITableEntity, new()
-        {
-            ITableEntity newEntity = CopyEntity<TEntity>(op.GetEntity());
-            switch (op.GetOperationType())
-            {
-                case TableOperationType.Insert:
-                    return TableOperation.Insert(newEntity);
-                case TableOperationType.Replace:
-                    return TableOperation.Replace(newEntity);
-                case TableOperationType.Merge:
-                    return TableOperation.Merge(newEntity);
-                case TableOperationType.Delete:
-                    return TableOperation.Delete(newEntity);
-                case TableOperationType.InsertOrReplace:
-                    return TableOperation.InsertOrReplace(newEntity);
-                case TableOperationType.InsertOrMerge:
-                    return TableOperation.InsertOrMerge(newEntity);
-                default:
-                    throw new NotImplementedException();
-            }
-        }
-        public static TableBatchOperation CopyBatch<TEntity>(TableBatchOperation batch)
-            where TEntity : ITableEntity, new()
-        {
-            var batch2 = new TableBatchOperation();
-            foreach (TableOperation op in batch)
-                batch2.Add(CopyOperation<TEntity>(op));
-            return batch2;
-        }
-
         public static string GetBatchPartitionKey(TableBatchOperation batch)
         {
             try
@@ -248,16 +216,6 @@ namespace ChainTableInterface
             }
         }
 
-        // Believe it or not!  Tested with the Visual Studio Azure table editor.
-        public static readonly PrimaryKey FirstValidPrimaryKey = new PrimaryKey("", "");
-
-        public static PrimaryKey NextValidPrimaryKeyAfter(PrimaryKey key)
-        {
-            // Row key is a UTF-16 string, and U+0000 through U+001F are not
-            // allowed, so appending U+0020 gives the next valid key.
-            // https://msdn.microsoft.com/en-us/library/azure/dd179338.aspx
-            return new PrimaryKey(key.PartitionKey, key.RowKey + " ");
-        }
     }
 
     // XXX: What's the proper naming convention for this type of class in C#?

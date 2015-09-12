@@ -47,17 +47,5 @@ namespace Migration
         // support IDictionary (e.g., as used by ITableEntity) without making
         // Dictionary ambiguous, we would need two more overloads.
 
-        // XXX: This algorithm is slow.
-        public static IEnumerable<T> IntersectAll<T>(this IEnumerable<IEnumerable<T>> sets)
-        {
-            IEnumerable<T> partialIntersection = null;
-            foreach (IEnumerable<T> set in sets)
-            {
-                partialIntersection = (partialIntersection == null) ? set : partialIntersection.Intersect(set);
-            }
-            if (partialIntersection == null)
-                throw new ArgumentException("Cannot IntersectAll on an empty family of sets");
-            return partialIntersection;
-        }
     }
 }
