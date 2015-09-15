@@ -57,9 +57,21 @@ namespace Migration
         // Revise as necessary for test case size.
         internal static readonly int TABLE_CALL_LIMIT = 100;
 
+        internal static Dictionary<string, string> TestVars = new Dictionary<string, string>();
+
+        // Provide a similar API we can use even in P# production mode.
+        internal static string GetTestVar(string name)
+        {
+            string value;
+            if (TestVars.TryGetValue(name, out value))
+                return value;
+            else
+                return PSharpRuntime.GetTestVar(name);
+        }
+
         internal static MTableOptionalBug? GetEnabledBug()
         {
-            string bugVar = PSharpRuntime.GetTestVar("mtablebug");
+            string bugVar = GetTestVar("mtablebug");
             if (bugVar == null) return null;
             int i = int.Parse(bugVar);
             if (i >= 0 && i < (int)MTableOptionalBug.NumBugs)
@@ -68,7 +80,7 @@ namespace Migration
         }
         internal static string GetEnabledBugTest()
         {
-            return PSharpRuntime.GetTestVar("mtablebugtest");
+            return GetTestVar("mtablebugtest");
         }
     }
 
@@ -969,6 +981,15 @@ namespace Migration
         }
         public static void Main(string[] args)
         {
+            foreach (string arg in args)
+            {
+                // Copied from PSharp CommandLineOptions.
+                if (arg.ToLower().StartsWith("/testvar:") && arg.Contains("="))
+                {
+                    string[] parts = arg.Substring(9).Split(new char[] { '=' }, 2);
+                    MigrationModel.TestVars[parts[0]] = parts[1];
+                }
+            }
             PSharpEntryPoint();
             Console.ReadLine();
         }
