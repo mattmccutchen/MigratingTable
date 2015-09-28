@@ -1,6 +1,7 @@
 ﻿// MigratingTable
 // Copyright (c) Microsoft Corporation; see license.txt
 
+using static ChainTableInterface.OutcomeStatics;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Table;
 using Microsoft.WindowsAzure.Storage.Table.Protocol;
@@ -40,7 +41,7 @@ namespace ChainTableInterface
 
         public bool Equals(PrimaryKey that)
         {
-            return Equals(PartitionKey, that.PartitionKey) && Equals(RowKey, that.RowKey);
+            return that != null && Equals(PartitionKey, that.PartitionKey) && Equals(RowKey, that.RowKey);
         }
         public override bool Equals(object o)
         {
@@ -49,11 +50,7 @@ namespace ChainTableInterface
 
         public override int GetHashCode()
         {
-            // Avoid a dependency on Migration.Utils for now.
-            unchecked
-            {
-                return 31 * PartitionKey.GetHashCode() + RowKey.GetHashCode();
-            }
+            return Hasher.Start.With(PartitionKey.GetHashCode()).With(RowKey.GetHashCode());
         }
 
         public override string ToString()
@@ -327,6 +324,86 @@ namespace ChainTableInterface
         public bool DeleteIfExists()
         {
             throw new NotImplementedException();
+        }
+    }
+
+    public class ChainTable2LoggingProxy : AbstractChainTable2
+    {
+        readonly IChainTable2 original;
+        readonly string proxyName;
+        int queryStreamCount = 0;
+
+        public ChainTable2LoggingProxy(IChainTable2 original, string proxyName)
+        {
+            this.original = original;
+            this.proxyName = proxyName;
+        }
+
+        public override Task<IList<TElement>> ExecuteQueryAtomicAsync<TElement>(TableQuery<TElement> query, TableRequestOptions requestOptions = null, OperationContext operationContext = null)
+        {
+            // We could reduce this boilerplate if we used RealProxy, like
+            // PSharpProxy does.  But since we need a custom class anyway to
+            // wrap the query stream, we pay this boilerplate rather than using
+            // two proxies.
+            CallLogging.LogStart(proxyName, nameof(ExecuteQueryAtomicAsync), query, requestOptions, operationContext);
+            return LogOutcomeAsync(() => original.ExecuteQueryAtomicAsync(query, requestOptions, operationContext),
+                (outcome) => CallLogging.LogEnd(proxyName, nameof(ExecuteQueryAtomicAsync), outcome, query, requestOptions, operationContext));
+        }
+
+        public override Task<IQueryStream<TElement>> ExecuteQueryStreamedAsync<TElement>(TableQuery<TElement> query, TableRequestOptions requestOptions = null, OperationContext operationContext = null)
+        {
+            CallLogging.LogStart(proxyName, nameof(ExecuteQueryStreamedAsync), query, requestOptions, operationContext);
+            return LogOutcomeAsync<IQueryStream<TElement>>(async () => {
+                IQueryStream<TElement> origStream = await original.ExecuteQueryStreamedAsync(query, requestOptions, operationContext);
+                return new QueryStreamLoggingProxy<TElement>(origStream, string.Format("{0} QueryStream {1}", proxyName, queryStreamCount++));
+            },
+                (outcome) => CallLogging.LogEnd(proxyName, nameof(ExecuteQueryStreamedAsync), outcome, query, requestOptions, operationContext));
+        }
+
+        public override Task<IList<TableResult>> ExecuteBatchAsync(TableBatchOperation batch, TableRequestOptions requestOptions = null, OperationContext operationContext = null)
+        {
+            CallLogging.LogStart(proxyName, nameof(ExecuteBatchAsync), batch, requestOptions, operationContext);
+            return LogOutcomeAsync(() => original.ExecuteBatchAsync(batch, requestOptions, operationContext),
+                (outcome) => CallLogging.LogEnd(proxyName, nameof(ExecuteBatchAsync), outcome, batch, requestOptions, operationContext));
+        }
+
+        class QueryStreamLoggingProxy<TElement> : IQueryStream<TElement>
+            where TElement : ITableEntity, new()
+        {
+            readonly IQueryStream<TElement> original;
+            readonly string proxyName;
+
+            internal QueryStreamLoggingProxy(IQueryStream<TElement> original, string proxyName)
+            {
+                this.original = original;
+                this.proxyName = proxyName;
+            }
+
+            public void Dispose()
+            {
+                CallLogging.LogStart(proxyName, nameof(Dispose));
+                LogOutcome(() => original.Dispose(),
+                    (outcome) => CallLogging.LogEnd(proxyName, nameof(Dispose), outcome));
+            }
+
+            public Task<PrimaryKey> GetContinuationPrimaryKeyAsync()
+            {
+                CallLogging.LogStart(proxyName, nameof(GetContinuationPrimaryKeyAsync));
+                return LogOutcomeAsync(() => original.GetContinuationPrimaryKeyAsync(),
+                    (outcome) => CallLogging.LogEnd(proxyName, nameof(GetContinuationPrimaryKeyAsync), outcome));
+            }
+
+            public Task<TElement> ReadRowAsync()
+            {
+                CallLogging.LogStart(proxyName, nameof(ReadRowAsync));
+                return LogOutcomeAsync(() => original.ReadRowAsync(),
+                    (outcome) => CallLogging.LogEnd(proxyName, nameof(ReadRowAsync), outcome));
+            }
+
+            public override string ToString()
+            {
+                return string.Format("<{0}>", proxyName);
+            }
         }
     }
 }

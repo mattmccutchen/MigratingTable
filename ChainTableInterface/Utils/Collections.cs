@@ -5,7 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace Migration
+namespace ChainTableInterface
 {
     public static class CollectionStatics
     {

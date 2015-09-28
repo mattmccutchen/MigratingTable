@@ -14,7 +14,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Migration
+namespace ChainTableInterface
 {
     /* Equality comparer that compares the content of some objects we care
      * about that don't override Equals (and GetHashCode) themselves.
@@ -39,9 +39,9 @@ namespace Migration
             // If we had a lot of these cases, we could make some framework
             // to fixpoint a combination of EqualityComparers.
             // XXX: Now we do, but still not a priority.
-            IOutcome<object, Exception> xOutcome, yOutcome;
-            if ((xOutcome = x as IOutcome<object, Exception>) != null
-                && (yOutcome = y as IOutcome<object, Exception>) != null)
+            IOutcome xOutcome, yOutcome;
+            if ((xOutcome = x as IOutcome) != null
+                && (yOutcome = y as IOutcome) != null)
             {
                 return Equals(xOutcome.Result, yOutcome.Result)
                     && Equals(xOutcome.Exception, yOutcome.Exception);
@@ -104,8 +104,8 @@ namespace Migration
 
         public override int GetHashCode(object obj)
         {
-            IOutcome<object, Exception> outcome;
-            if ((outcome = obj as IOutcome<object, Exception>) != null)
+            IOutcome outcome;
+            if ((outcome = obj as IOutcome) != null)
                 return Hasher.Start.With(GetHashCode(outcome.Result)).With(GetHashCode(outcome.Exception));
             ITableEntity entity;
             if ((entity = obj as ITableEntity) != null)
@@ -154,32 +154,39 @@ namespace Migration
             unchecked
             {
                 // I would probably support KeyValuePair as another case in
-                // BetterComparerClass if it were easy, but it's nontrivial
+                // BetterComparer if it were easy, but it's nontrivial
                 // to check for a KeyValuePair of any type arguments. :(
                 return dict.Aggregate(0, (h, kvp) => h + Hasher.Start.With(GetHashCode(kvp.Key)).With(GetHashCode(kvp.Value)));
             }
         }
 
-        static readonly Type typeofTableQueryGeneric = typeof(TableQuery<object>).GetGenericTypeDefinition();
-#if false
-        static readonly PropertyInfo
-            TableQuery_ElementType = typeofTableQueryGeneric.GetProperty("ElementType"),
-            TableQuery_FilterString = typeofTableQueryGeneric.GetProperty("FilterString"),
-            TableQuery_SelectColumns = typeofTableQueryGeneric.GetProperty("SelectColumns"),
-            TableQuery_TakeCount = typeofTableQueryGeneric.GetProperty("TakeCount");
-#endif
-
-        private static string TableQueryToString<TElement>(TableQuery<TElement> query)
+        class TableQueryToString : WildcardCapturerBase<string>
         {
-            return string.Format("TableQuery<{0}>{{FilterString={1}, SelectColumns={2}, TakeCount={3}}}",
-                query.ElementType, query.FilterString, query.SelectColumns, query.TakeCount);
+            TableQueryToString() : base(typeof(TableQuery<>)) { }
+            public string Invoke<TElement>(TableQuery<TElement> query)
+            {
+                return string.Format("TableQuery<{0}>{{FilterString={1}, SelectColumns={2}, TakeCount={3}}}",
+                    query.ElementType, query.FilterString, query.SelectColumns, query.TakeCount);
+            }
+            internal static readonly TableQueryToString Instance = new TableQueryToString();
+        }
+        class KeyValuePairToString : WildcardCapturerBase<string>
+        {
+            KeyValuePairToString() : base(typeof(KeyValuePair<,>)) { }
+            public string Invoke<TKey, TValue>(KeyValuePair<TKey, TValue> kvp)
+            {
+                // Nicer notation in general, and print null as "null".
+                return string.Format("({0}: {1})", BetterComparer.ToString(kvp.Key), BetterComparer.ToString(kvp.Value));
+            }
+            internal static readonly KeyValuePairToString Instance = new KeyValuePairToString();
         }
 
         public static string ToString(object obj)
         {
             if (obj == null) return "null";
-            IOutcome<object, Exception> outcome;
-            if ((outcome = obj as IOutcome<object, Exception>) != null)
+            string ret;
+            IOutcome outcome;
+            if ((outcome = obj as IOutcome) != null)
                 return (outcome.Exception != null) ? ToString(outcome.Exception) : ToString(outcome.Result);
             TableOperation op;
             if ((op = obj as TableOperation) != null)
@@ -196,20 +203,10 @@ namespace Migration
             {
                 return "TableBatchOperation{" + string.Join(",", from e in batch select ToString(e)) + "}";
             }
-            // Some mess here is unavoidable.  At least this approach separates
-            // the mess from the behavior of interest.
-            if (obj.GetType().IsGenericType && obj.GetType().GetGenericTypeDefinition() == typeofTableQueryGeneric)
-            {
-                return (string)typeof(BetterComparer).GetMethod(
-                    nameof(TableQueryToString), BindingFlags.NonPublic | BindingFlags.Static)
-                    .MakeGenericMethod(obj.GetType().GenericTypeArguments[0])
-                    .Invoke(null, new object[] { obj });
-#if false
-                return string.Format("TableQuery<{0}>{{FilterString={1}, SelectColumns={2}, TakeCount={3}}}",
-                    TableQuery_ElementType.GetValue(obj), TableQuery_FilterString.GetValue(obj),
-                    TableQuery_SelectColumns.GetValue(obj), TableQuery_TakeCount.GetValue(obj));
-#endif
-            }
+            if ((ret = TableQueryToString.Instance.CaptureOrDefault(obj)) != null)
+                return ret;
+            if ((ret = KeyValuePairToString.Instance.CaptureOrDefault(obj)) != null)
+                return ret;
             ITableEntity entity;
             if ((entity = obj as ITableEntity) != null)
             {
@@ -228,12 +225,6 @@ namespace Migration
             if ((result = obj as TableResult) != null)
             {
                 return "TableResult{HttpStatusCode=" + result.HttpStatusCode + ", ETag=" + result.Etag + ", Result=" + ToString(result.Result) + "}";
-            }
-            SpuriousETagChange etagChange;
-            if ((etagChange = obj as SpuriousETagChange) != null)
-            {
-                return string.Format("SpuriousETagChange{{partitionKey={0}, rowKey={1}, newETag={2}}}",
-                    etagChange.partitionKey, etagChange.rowKey, etagChange.newETag);
             }
             IReadOnlyList<object> list;
             if ((list = obj as IReadOnlyList<object>) != null)

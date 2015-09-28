@@ -9,6 +9,7 @@ using System.Runtime.Remoting.Messaging;
 using System.Reflection;
 using System.Diagnostics;
 using System.Linq;
+using ChainTableInterface;
 
 namespace Migration
 {
@@ -36,7 +37,7 @@ namespace Migration
         internal readonly MachineId callerMachineId;
         internal readonly MachineId hostMachineId;
         internal readonly object target;
-        internal readonly string targetDebugName;
+        internal readonly string proxyName;
         // The anticipated use case is to control the event type (for selective
         // deferral, etc.) since we'll always overwrite the payload.
         readonly EventFactory eventFactory;
@@ -59,17 +60,28 @@ namespace Migration
             this.callerMachineId = callerMachineId;
             this.hostMachineId = hostMachineId;
             this.target = target;
-            this.targetDebugName = targetDebugName;
             this.eventFactory = eventFactory;
+            proxyName = (targetDebugName == null) ? null :
+                string.Format("PSharpProxy from {0} to {1} for {2}", callerMachineId, hostMachineId, targetDebugName);
         }
 
-        IMethodReturnMessage Invoke1<TResult>(IMethodCallMessage callMsg)
+        class Capturer : TypeCapturer<IMethodReturnMessage>
         {
-            // TODO: Create a reply ID once we know what information we need to include in it.
-            var replyTarget = new ReplyTarget<TResult>(null, callerMachineId);
-            PSharpRuntime.SendEvent(hostMachineId, eventFactory(),
-                new CallPayload<TResult>(this, replyTarget, (MethodInfo)callMsg.MethodBase, callMsg.Args));
-            return new ReturnMessage(replyTarget.tcs.Task, null, 0, callMsg.LogicalCallContext, callMsg);
+            readonly PSharpRealProxy outer;
+            readonly IMethodCallMessage callMsg;
+            internal Capturer(PSharpRealProxy outer, IMethodCallMessage callMsg)
+            {
+                this.outer = outer;
+                this.callMsg = callMsg;
+            }
+            public override IMethodReturnMessage Invoke<TResult>()
+            {
+                // TODO: Create a reply ID once we know what information we need to include in it.
+                var replyTarget = new ReplyTarget<TResult>(null, outer.callerMachineId);
+                PSharpRuntime.SendEvent(outer.hostMachineId, outer.eventFactory(),
+                    new CallPayload<TResult>(outer, replyTarget, (MethodInfo)callMsg.MethodBase, callMsg.Args));
+                return new ReturnMessage(replyTarget.tcs.Task, null, 0, callMsg.LogicalCallContext, callMsg);
+            }
         }
 
         public override IMessage Invoke(IMessage msg)
@@ -84,16 +96,13 @@ namespace Migration
             // I wish we could pattern match here.
             Type returnResultType;
             if (returnTaskType == typeof(Task))
-                returnResultType = typeof(object);  // dummy
+                returnResultType = typeof(Void2);  // See compensating code in CallPayload.Dispatch.
             else if (returnTaskType.GetGenericTypeDefinition().Equals(typeofTaskGeneric))
                 returnResultType = returnTaskType.GenericTypeArguments[0];
             else
                 throw new NotImplementedException();
 
-            // In Java, this would be a wildcard capture on returnResultType.  Here, it's a total mess. :(
-            // XXX: Is there any reasonable way to factor this out into Utils?
-            MethodInfo invoke1 = typeof(PSharpRealProxy).GetMethod(nameof(Invoke1), BindingFlags.NonPublic | BindingFlags.Instance).MakeGenericMethod(returnResultType);
-            return (IMethodReturnMessage)invoke1.Invoke(this, new object[] { callMsg });
+            return new Capturer(this, callMsg).Capture(returnResultType);
         }
     }
 
@@ -115,10 +124,8 @@ namespace Migration
         public async void Dispatch()
         {
             Outcome<TResult, Exception> outcome;
-            string argsDebug = string.Join(",", from a in args select BetterComparer.ToString(a));
-            Console.WriteLine(string.Format("Start call from {0} to {1}: {2}.{3}({4})",
-                realProxy.callerMachineId, realProxy.hostMachineId,
-                realProxy.targetDebugName, method.Name, argsDebug));
+            if (realProxy.proxyName != null)
+                CallLogging.LogStart(realProxy.proxyName, method.Name, args);
             object obj;
             try
             {
@@ -132,22 +139,38 @@ namespace Migration
             Task<TResult> task = obj as Task<TResult>;
             if (task == null)
             {
+                // Can only happen when we chose TResult == Void2 for a method
+                // that actually returns plain Task.
+
                 // The more obvious task = ((Task)obj).ContinueWith(_ => default(TResult))
                 // executes outside the synchronization context and posts a continuation
                 // back to the synchronization context, which calls Send, which trips my
-                // assertion in the P# scheduler.
+                // assertion in the P# scheduler.  The P# task handling needs to change
+                // anyway, but it's fine to keep this version.
                 task = ((Func<Task<TResult>>)(async () =>
                 {
                     await (Task)obj;
                     return default(TResult);
                 }))();
             }
-            outcome = await Catching<Exception>.Task(task);
+            // From here to Finish is basically
+            // "Catching<Exception>.AwaitTaskAsync(task)", but such a method
+            // would be prone to misuse and this is the only place we need it,
+            // so inline it here.
+            TResult result;
+            try
+            {
+                result = await task;
+            }
+            catch (Exception ex)
+            {
+                outcome = new Outcome<TResult, Exception>(ex);
+                goto Finish;
+            }
+            outcome = new Outcome<TResult, Exception>(result);
             Finish:
-            Console.WriteLine(string.Format("End call from {0} to {1}: {2}.{3}({4}) with outcome: {5}",
-                realProxy.callerMachineId, realProxy.hostMachineId,
-                realProxy.targetDebugName, method.Name, argsDebug,
-                BetterComparer.ToString(outcome)));
+            if (realProxy.proxyName != null)
+                CallLogging.LogEnd(realProxy.proxyName, method.Name, outcome, args);
             replyTarget.SetOutcome(outcome);
         }
     }

@@ -8,7 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Migration
+namespace ChainTableInterface
 {
     // Compare to http://blogs.msdn.com/b/pfxteam/archive/2012/02/12/10266988.aspx.
     // We could consider incorporating some of the optimizations from there or

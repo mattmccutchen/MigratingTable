@@ -4,6 +4,7 @@
 using System;
 using System.Threading.Tasks;
 using Microsoft.PSharp;
+using ChainTableInterface;
 
 namespace Migration
 {

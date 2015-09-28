@@ -1,7 +1,7 @@
 ﻿// MigratingTable
 // Copyright (c) Microsoft Corporation; see license.txt
 
-namespace Migration
+namespace ChainTableInterface
 {
     // We want to make this a struct, so we have to live with people being
     // able to create default instances.

@@ -1,6 +1,8 @@
 ﻿// MigratingTable
 // Copyright (c) Microsoft Corporation; see license.txt
 
+using ChainTableInterface;
+using static ChainTableInterface.OutcomeStatics;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -103,6 +105,78 @@ namespace Migration
             subscriptions.Add(subscription);
             currentConfig = this.currentConfig;
             return subscription;
+        }
+    }
+
+    public class ConfigurationServiceLoggingProxy<TConfig> : IConfigurationService<TConfig>
+    {
+        readonly IConfigurationService<TConfig> original;
+        readonly string proxyName;
+        int subscriptionCount = 0;
+
+        public ConfigurationServiceLoggingProxy(IConfigurationService<TConfig> original, string proxyName)
+        {
+            this.original = original;
+            this.proxyName = proxyName;
+        }
+        public Task PushConfigurationAsync(TConfig newConfig)
+        {
+            CallLogging.LogStart(proxyName, nameof(PushConfigurationAsync), newConfig);
+            return LogOutcomeAsync(() => original.PushConfigurationAsync(newConfig),
+                (outcome) => CallLogging.LogEnd(proxyName, nameof(PushConfigurationAsync), outcome, newConfig));
+        }
+
+        public IDisposable Subscribe(IConfigurationSubscriber<TConfig> subscriber, out TConfig currentConfig)
+        {
+            int subscriptionNum = subscriptionCount++;
+            var subscriberProxy = new SubscriberLoggingProxy(subscriber, string.Format("{0} subscriber {1}", proxyName, subscriptionNum));
+            CallLogging.LogStart(proxyName, nameof(Subscribe), subscriberProxy);
+            // Some mess because of "out" parameter.  Does the convenience of
+            // "out" parameters in the common case merit the mess here?
+            var t = LogOutcome(() => {
+                TConfig currentConfig1;
+                var subscriptionProxy1 = new SubscriptionLoggingProxy(
+                    original.Subscribe(subscriberProxy, out currentConfig1),
+                    string.Format("{0} subscription {1}", proxyName, subscriptionNum));
+                return Tuple.Create(currentConfig1, subscriptionProxy1);
+            }, (outcome) => CallLogging.LogEnd(proxyName, nameof(Subscribe), outcome, subscriberProxy));
+            currentConfig = t.Item1;
+            return t.Item2;
+        }
+
+        class SubscriberLoggingProxy : IConfigurationSubscriber<TConfig>
+        {
+            readonly IConfigurationSubscriber<TConfig> original;
+            readonly string proxyName;
+            internal SubscriberLoggingProxy(IConfigurationSubscriber<TConfig> original, string proxyName)
+            {
+                this.original = original;
+                this.proxyName = proxyName;
+            }
+
+            public Task ApplyConfigurationAsync(TConfig newConfig)
+            {
+                CallLogging.LogStart(proxyName, nameof(ApplyConfigurationAsync), newConfig);
+                return LogOutcomeAsync(() => original.ApplyConfigurationAsync(newConfig),
+                    (outcome) => CallLogging.LogEnd(proxyName, nameof(ApplyConfigurationAsync), outcome, newConfig));
+            }
+        }
+        class SubscriptionLoggingProxy : IDisposable
+        {
+            readonly IDisposable original;
+            readonly string proxyName;
+            internal SubscriptionLoggingProxy(IDisposable original, string proxyName)
+            {
+                this.original = original;
+                this.proxyName = proxyName;
+            }
+
+            public void Dispose()
+            {
+                CallLogging.LogStart(proxyName, nameof(Dispose));
+                LogOutcome(() => original.Dispose(),
+                    (outcome) => CallLogging.LogEnd(proxyName, nameof(Dispose), outcome));
+            }
         }
     }
 }

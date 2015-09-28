@@ -21,13 +21,18 @@ namespace Migration
             this.rowKey = rowKey;
             this.newETag = newETag;
         }
+        public override string ToString()
+        {
+            return string.Format("SpuriousETagChange{{partitionKey={0}, rowKey={1}, newETag={2}}}",
+                partitionKey, rowKey, newETag);
+        }
     }
 
     public interface IChainTableMonitor
     {
         /*
          * The backend and monitor calls by verifiable table layers should follow this sequence
-         * (this does not preclude other local work from being done in parallel):
+         * (this does not preclude other local work from being done in parallel with the calls):
          *
          *  (
          *    await backend call
@@ -35,27 +40,34 @@ namespace Migration
          *  )*
          *
          * This applies even if the backend call throws an exception that is
-         * part of the semantics.  The expected handling of unexpected
-         * exceptions is not clearly defined.
+         * part of the semantics, but verifiable table layers are allowed to
+         * simply propagate unexpected exceptions since any such exceptions that
+         * occur during testing reflect a bug in either the code under test or
+         * the test harness and will be reported as such.
+         *
+         * Exception: Neither ExecuteQueryStreamed nor ReadRowAsync on the
+         * resulting stream should be annotated.  Since neither of them can be
+         * a linearization point or cause spurious ETag changes, the harness
+         * does not expect an annotation for them.
          *
          * XXX: Have the verification framework enforce this automatically?
          */
 
         /*
-         * If the current incoming call is an ExecuteBatchAsync that is going to
-         * succeed, then successfulBatchResult must be its result, including the
-         * new ETags.  This allows the verification harness to mirror the batch on
-         * the reference table using the same new ETags before unlocking the
-         * TablesMachine for other ServiceMachines.  (The verification does not
-         * use ExecuteAsync.)
+         * Each call to ExecuteQueryAtomicAsync or ExecuteBatchAsync must report
+         * exactly one backend call as its linearization point, even if it is
+         * failing with a state-dependent exception.  Currently our test does
+         * not cover invalid parameters that can be rejected without any backend
+         * calls; if we add them, we'll need to find a way to annotate them.
+         *
+         * When reporting the linearization point for an ExecuteBatchAsync that
+         * is going to succeed, then successfulBatchResult must be its result,
+         * including the new ETags.  This allows the test harness to mirror the
+         * batch on the reference table using the same new ETags before
+         * unlocking the TablesMachine for other ServiceMachines.  (The test
+         * does not use ExecuteAsync.)
          *
          * In all other cases, successfulBatchResult must be null.
-         *
-         * For now, the verification does not deal with ExecuteQueryStreamed at
-         * all.  ExecuteQueryStreamed backend calls should not be annotated.  A
-         * verifiable table layer's implementation of ExecuteQueryStreamed
-         * should not report a linearization point, but it should annotate
-         * backend calls (other than ExecuteQueryStreamed) as normal.
          *
          * Passing one or more spurious ETag changes in combination with
          * wasLinearizationPoint = true is disallowed until we have a use case

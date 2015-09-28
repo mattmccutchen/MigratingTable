@@ -4,7 +4,7 @@
 using System;
 using System.Threading;
 
-namespace Migration
+namespace ChainTableInterface
 {
     class SynchronizationContextUse : IDisposable
     {

@@ -86,6 +86,12 @@ namespace Migration
         {
             this.state = state;
         }
+
+        // For debugging.
+        public override string ToString()
+        {
+            return string.Format("MTableConfiguration{{{0}}}", state);
+        }
     }
 
     public class MigratingTable : AbstractChainTable2
@@ -663,7 +669,7 @@ namespace Migration
                 public void Dispose() { }
             }
 
-            Task<IDisposable> LockAsyncBuggable()
+            Task<IDisposable> LockBuggableAsync()
             {
                 if (outer.IsBugEnabled(MTableOptionalBug.QueryStreamedLock))
                 {
@@ -692,7 +698,7 @@ namespace Migration
 
             internal async Task StartAsync()
             {
-                using (await LockAsyncBuggable())
+                using (await LockBuggableAsync())
                 {
                     configSubscription = outer.configService.Subscribe(new Subscriber(this), out currentConfig);
                     if (currentConfig.state < TableClientState.USE_NEW_WITH_TOMBSTONES)
@@ -737,7 +743,7 @@ namespace Migration
 
             public async Task<PrimaryKey> GetContinuationPrimaryKeyAsync()
             {
-                using (await LockAsyncBuggable())
+                using (await LockBuggableAsync())
                 {
                     CheckDisposed();
                     return InternalGetContinuationPrimaryKey();
@@ -747,7 +753,7 @@ namespace Migration
             // XXX: This could loop a long time.  Do we want to make it cancelable?
             public async Task<TElement> ReadRowAsync()
             {
-                using (await LockAsyncBuggable())
+                using (await LockBuggableAsync())
                 {
                     CheckDisposed();
                     for (;;)
@@ -779,7 +785,7 @@ namespace Migration
 
             async Task ApplyConfigurationAsync(MTableConfiguration newConfig)
             {
-                using (await LockAsyncBuggable())
+                using (await LockBuggableAsync())
                 {
                     PrimaryKey continuationKey = InternalGetContinuationPrimaryKey();
                     // ExecuteQueryStreamedAsync validated that mtableQuery has no select or top.
@@ -862,7 +868,7 @@ namespace Migration
                 // were more confident in "asynchronous dispose" as a general
                 // pattern that callers could learn to cope with.
                 // XXX Prevent indefinite postponement?
-                using (await LockAsyncBuggable())
+                using (await LockBuggableAsync())
                 {
                     if (!disposed)
                     {

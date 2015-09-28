@@ -269,7 +269,7 @@ namespace Migration
             //   P# considers that a success!  To fix that, we need to enable liveness checking.
 
             currentReferenceCall = referenceCall;
-            object actualOutcome = await Catching<StorageException>.Task(originalCall(migratingTable));
+            object actualOutcome = await Catching<StorageException>.RunAsync(() => originalCall(migratingTable));
 
             // Verify that successfulBatchResult was correct if specified.
             // (Ideally, we'd also catch if it isn't specified when it should
@@ -320,8 +320,8 @@ namespace Migration
             PSharpRuntime.Assert(currentReferenceOutcome == null,
                 "{0}: The call already reported a linearization point.", machineId);
             this.successfulBatchResult = successfulBatchResult;
-            currentReferenceOutcome = await Catching<StorageException>.Task(
-                annotationProxy.AnnotateLastBackendCallAsync(currentReferenceCall, null));
+            currentReferenceOutcome = await Catching<StorageException>.RunAsync(
+                () => annotationProxy.AnnotateLastBackendCallAsync(currentReferenceCall, null));
         }
 
         internal async Task RunQueryStreamedAsync(TableQuery<DynamicTableEntity> query)
@@ -549,16 +549,15 @@ namespace Migration
         }
 
         internal ConfigurationServicePSharpProxy(MachineId callerMachineId, MachineId hostMachineId,
-            IConfigurationService<TConfig> original, string originalDebugName)
+            IConfigurationService<TConfig> original)
         {
             TConfig initialConfig;
             originalProxy = PSharpRealProxy.MakeTransparentProxy(callerMachineId, hostMachineId, original,
-                originalDebugName, () => new GenericDispatchableEvent());
+                null, () => new GenericDispatchableEvent());
 
             IConfigurationSubscriber<TConfig> subscriberReverseProxy =
                 PSharpRealProxy.MakeTransparentProxy(hostMachineId, callerMachineId,
-                    (IConfigurationSubscriber<TConfig>)new Subscriber(this),
-                    string.Format("<{0} subscriber>", originalDebugName),
+                    (IConfigurationSubscriber<TConfig>)new Subscriber(this), null,
                     () => new GenericDispatchableEvent());
             // XXX Implement IDisposable.  Would need to proxy the dispose as well.
             original.Subscribe(subscriberReverseProxy, out initialConfig);
@@ -579,47 +578,41 @@ namespace Migration
     class ChainTable2PSharpProxy : AbstractChainTable2
     {
         readonly MachineId callerMachineId, hostMachineId;
-        readonly string debugName;
-        readonly IChainTable2 plainEventProxy;
-        readonly IChainTable2 tableCallEventProxy;
+        readonly IChainTable2 nonannotatableCallProxy;
+        readonly IChainTable2 annotatableCallProxy;
 
-        internal ChainTable2PSharpProxy(MachineId callerMachineId, MachineId hostMachineId,
-            IChainTable2 original, string debugName)
+        internal ChainTable2PSharpProxy(MachineId callerMachineId, MachineId hostMachineId, IChainTable2 original)
         {
             this.callerMachineId = callerMachineId;
             this.hostMachineId = hostMachineId;
-            this.debugName = debugName;
-            plainEventProxy = PSharpRealProxy.MakeTransparentProxy(callerMachineId, hostMachineId, original,
-                debugName, () => new GenericDispatchableEvent());
-            tableCallEventProxy = PSharpRealProxy.MakeTransparentProxy(callerMachineId, hostMachineId, original,
-                debugName, () => new TableCallEvent());
+            nonannotatableCallProxy = PSharpRealProxy.MakeTransparentProxy(callerMachineId, hostMachineId, original,
+                null, () => new TableNonannotatableCallEvent());
+            annotatableCallProxy = PSharpRealProxy.MakeTransparentProxy(callerMachineId, hostMachineId, original,
+                null, () => new TableAnnotatableCallEvent());
         }
 
         public override Task<TableResult> ExecuteAsync(TableOperation operation, TableRequestOptions requestOptions = null, OperationContext operationContext = null)
         {
-            //Trace.TraceInformation("{0} calling {1}.ExecuteAsync({2})", callerMachineId, debugName, BetterComparer.ToString(operation));
-            return tableCallEventProxy.ExecuteAsync(operation, requestOptions, operationContext);
+            return annotatableCallProxy.ExecuteAsync(operation, requestOptions, operationContext);
         }
 
         public override Task<IList<TableResult>> ExecuteBatchAsync(TableBatchOperation batch, TableRequestOptions requestOptions = null, OperationContext operationContext = null)
         {
-            //Trace.TraceInformation("{0} calling {1}.ExecuteBatchAsync({2})", callerMachineId, debugName, BetterComparer.ToString(batch));
-            return tableCallEventProxy.ExecuteBatchAsync(batch, requestOptions, operationContext);
+            return annotatableCallProxy.ExecuteBatchAsync(batch, requestOptions, operationContext);
         }
 
         public override Task<IList<TElement>> ExecuteQueryAtomicAsync<TElement>(TableQuery<TElement> query, TableRequestOptions requestOptions = null, OperationContext operationContext = null)
         {
-            //Trace.TraceInformation("{0} calling {1}.ExecuteQueryAtomicAsync({2})", callerMachineId, debugName, BetterComparer.ToString(query));
-            return tableCallEventProxy.ExecuteQueryAtomicAsync(query, requestOptions, operationContext);
+            return annotatableCallProxy.ExecuteQueryAtomicAsync(query, requestOptions, operationContext);
         }
 
         class QueryStreamPSharpProxy<TElement> : IQueryStream<TElement>
             where TElement : ITableEntity, new()
         {
-            readonly IQueryStream<TElement> plainProxy;
-            internal QueryStreamPSharpProxy(IQueryStream<TElement> plainProxy)
+            readonly IQueryStream<TElement> nonannotatableProxy;
+            internal QueryStreamPSharpProxy(IQueryStream<TElement> nonannotatableProxy)
             {
-                this.plainProxy = plainProxy;
+                this.nonannotatableProxy = nonannotatableProxy;
             }
 
             // Dispose would take extra work to get working through
@@ -631,38 +624,31 @@ namespace Migration
 
             public Task<PrimaryKey> GetContinuationPrimaryKeyAsync()
             {
-                return plainProxy.GetContinuationPrimaryKeyAsync();
+                return nonannotatableProxy.GetContinuationPrimaryKeyAsync();
             }
 
             public Task<TElement> ReadRowAsync()
             {
-                return plainProxy.ReadRowAsync();
+                return nonannotatableProxy.ReadRowAsync();
             }
         }
 
         public override async Task<IQueryStream<TElement>> ExecuteQueryStreamedAsync<TElement>(TableQuery<TElement> query, TableRequestOptions requestOptions = null, OperationContext operationContext = null)
         {
-            //Trace.TraceInformation("{0} calling {1}.ExecuteQueryStreamedAsync({2})", callerMachineId, debugName, BetterComparer.ToString(query));
             // Philosophically, maybe this proxy-making belongs on the host
             // side, but that would require a second custom wrapper because we
             // still need the custom wrapper on the caller side to do the
             // different event types.
-            // NOTE: ReadRowAsync will be allowed to run while the tables machine
-            // is waiting for an annotation.  This should be OK because the only
-            // concern about waiting for an annotation is that the reference table
-            // may be out of date (and we have to be sure not to execute any other
-            // table calls that might get annotated out of order, but ReadRowAsync
-            // doesn't get annotated).
-            IQueryStream<TElement> remoteStream = await plainEventProxy.ExecuteQueryStreamedAsync(
+            IQueryStream<TElement> remoteStream = await nonannotatableCallProxy.ExecuteQueryStreamedAsync(
                 query, requestOptions, operationContext);
             return new QueryStreamPSharpProxy<TElement>(
                 PSharpRealProxy.MakeTransparentProxy(callerMachineId, hostMachineId, remoteStream,
-                string.Format("<{0} QueryStream>", debugName), () => new GenericDispatchableEvent()));
+                null, () => new TableNonannotatableCallEvent()));
         }
     }
 
-    class TablePeekEvent : Event { }
-    class TableCallEvent : Event { }
+    class TableNonannotatableCallEvent : Event { }
+    class TableAnnotatableCallEvent : Event { }
     class TableCallAnnotationEvent : Event { }
     class TablesMachineInitializedEvent : Event { }
 
@@ -773,17 +759,17 @@ namespace Migration
         [Start]
         [OnEntry(nameof(StartInitialization))]
         [OnEventGotoState(typeof(TablesMachineInitializedEvent), typeof(Ready))]
-        [DeferEvents(typeof(TablePeekEvent), typeof(TableCallEvent))]
+        [DeferEvents(typeof(TableNonannotatableCallEvent), typeof(TableAnnotatableCallEvent))]
         // XXX: Use Push or something to avoid having to redeclare GenericDispatchableEvent in every state?
         [OnEventDoAction(typeof(GenericDispatchableEvent), nameof(DispatchPayload))]
         class Initializing : MachineState { }
 
-        [OnEventDoAction(typeof(TablePeekEvent), nameof(DispatchPayload))]
-        [OnEventGotoState(typeof(TableCallEvent), typeof(WaitingForAnnotation), nameof(DispatchTableCall))]
+        [OnEventDoAction(typeof(TableNonannotatableCallEvent), nameof(DispatchPayload))]
+        [OnEventGotoState(typeof(TableAnnotatableCallEvent), typeof(WaitingForAnnotation), nameof(DispatchTableCall))]
         [OnEventDoAction(typeof(GenericDispatchableEvent), nameof(DispatchPayload))]
         class Ready : MachineState { }
 
-        [DeferEvents(typeof(TablePeekEvent), typeof(TableCallEvent))]
+        [DeferEvents(typeof(TableNonannotatableCallEvent), typeof(TableAnnotatableCallEvent))]
         [OnEventGotoState(typeof(TableCallAnnotationEvent), typeof(Ready), nameof(DispatchPayload))]
         [OnEventDoAction(typeof(GenericDispatchableEvent), nameof(DispatchPayload))]
         class WaitingForAnnotation : MachineState { }
@@ -826,11 +812,12 @@ namespace Migration
         void InitializeAppMachine(MachineId appMachineId)
         {
             Send(appMachineId, new AppMachineInitializeEvent(), new AppMachineInitializePayload(
-                new ConfigurationServicePSharpProxy<MTableConfiguration>(appMachineId, Id, configService, "configService"),
-                new ChainTable2PSharpProxy(appMachineId, Id, oldTable, "oldTable"),
-                new ChainTable2PSharpProxy(appMachineId, Id, newTable, "newTable"),
+                new ConfigurationServicePSharpProxy<MTableConfiguration>(appMachineId, Id,
+                    configService /*new ConfigurationServiceLoggingProxy<MTableConfiguration>(configService, string.Format("{0} configService", appMachineId))*/),
+                new ChainTable2PSharpProxy(appMachineId, Id, new ChainTable2LoggingProxy(oldTable, string.Format("{0} oldTable", appMachineId))),
+                new ChainTable2PSharpProxy(appMachineId, Id, new ChainTable2LoggingProxy(newTable, string.Format("{0} newTable", appMachineId))),
                 this.MakeTransparentProxy((ITablesMachinePeek)this, "tablesMachinePeek",
-                    appMachineId, () => new TablePeekEvent()),
+                    appMachineId, () => new TableNonannotatableCallEvent()),
                 this.MakeTransparentProxy((ITablesMachineAnnotation)this, "tablesMachineAnnotation",
                     appMachineId, () => new TableCallAnnotationEvent())));
         }
